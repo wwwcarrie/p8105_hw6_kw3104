@@ -1,0 +1,445 @@
+---
+title: "p8105_hw6_kw3104"
+output: html_document
+date: "2024-12-02"
+---
+```{r}
+library(p8105.datasets)
+
+library(broom)
+library(ggplot2)
+library(tidyverse)
+library(boot)
+library(knitr)
+library(purrr)
+library(modelr)
+library(forcats)
+library(dplyr)
+library(stringr)
+library(mgcv)
+
+set.seed(1)
+
+```
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+```
+
+
+## Problem 1
+```{r}
+
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") |>
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) |>
+  select(name, id, everything())
+```
+`weather_df` has 365 obs and 6 variables(name, id, data, prcp, tmax, tmin)
+
+function
+```{r}
+bootstrap_analysis <- function(data, indices) {
+  bootstrap_sample <- data[indices, ]
+  
+  # Fit the regression model
+  bootstrap_fit <- lm(tmax ~ tmin, data = weather_df)   
+  
+  # Extract R-squared using broom::glance()
+  r_squared <- broom::glance(bootstrap_fit)$r.squared
+  
+  # Extract coefficients using broom::tidy() and compute log(beta_0 * beta_1)
+  coefs <- broom::tidy(bootstrap_fit) |>
+    filter(term %in% c("(Intercept)", "tmin")) |>
+    pull(estimate)
+  log_beta_product <- log(coefs[1] * coefs[2])
+ 
+  
+  return(c(r_squared = r_squared, log_beta_product = log_beta_product))
+}
+
+```
+- r-squared = 0.912
+- beta 1 = 7.21, beta 2 = 1.04
+ 
+Perform 5000 bootstrap resamples
+```{r}
+
+bootstrap_results <- boot(
+  data = weather_df,
+  statistic = function(data, indices) unlist(bootstrap_analysis(data, indices)),
+  R = 5000
+)
+
+# Transform bootstrap results into a tibble
+bootstrap_df <- as_tibble(bootstrap_results$t) |>
+  rename(r_squared = V1, log_beta_product = V2)
+```
+
+r squared 
+```{r}
+r_squared_plot <- bootstrap_df |>
+  ggplot(aes(x = r_squared)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Bootstrap Distribution of R-squared",
+       x = "R-squared", y = "Density")
+
+r_squared_plot 
+```
+
+log beta
+```{r}
+log_beta_plot <- bootstrap_df |>
+  ggplot(aes(x = log_beta_product)) +
+  geom_density(fill = "red", alpha = 0.5) +
+  labs(title = "Bootstrap Distribution of log(beta_0 * beta_1)",
+       x = "log(beta_0 * beta_1)", y = "Density")
+
+log_beta_plot
+```
+
+```{r}
+ # Compute 95% confidence intervals
+ci_r_squared <- quantile(bootstrap_df$r_squared, probs = c(0.025, 0.975))
+ci_log_beta_product <- quantile(bootstrap_df$log_beta_product, probs = c(0.025, 0.975))
+
+# Create a data frame for confidence intervals
+ci_df <- data.frame(
+  Metric = c("R-squared", "log(beta_0 * beta_1)"),
+  Lower_2.5_Quantile = c(ci_r_squared[1], ci_log_beta_product[1]),
+  Upper_97.5_Quantile = c(ci_r_squared[2], ci_log_beta_product[2])
+)
+
+# Display the table using kable
+kable(ci_df, caption = "95% Confidence Intervals for Bootstrap Estimates")
+```
+- ci_r_squared:  2.5% = 0.8930823    97.5% = 0.9268338 
+
+- ci_log_beta_product: 2.5% = 1.965409  97.5% =  2.058278 
+
+## Problem 2
+
+```{r}
+
+# Load data 
+url = "https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv"
+homicide_data = read_csv(url)
+```
+- `homicide_data` has 52179 obs and 12 variables (uid, reported_date, victim_last, victim_first, victim_race, victim_age, etc.)
+
+
+```{r}
+
+homicide_cleaned =
+ homicide_data |>
+  mutate(
+    city_state = str_c(city, state, sep = ", "), # Combine city and state
+    victim_age = as.numeric(victim_age),  # Ensure victim_age is numeric
+    solved = case_when(
+      disposition %in% c("Closed without arrest", "Open/No arrest") ~ 0,
+      disposition == "Closed by arrest" ~ 1
+    )
+  ) |> 
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")), # Remove specified cities
+    victim_race %in% c("White", "Black"), # Include only White or Black victims
+    !is.na(victim_age)
+  ) |> 
+  select(city_state, solved, victim_age, victim_sex, victim_race)
+
+```
+after clean the data, `homicide_cleaned` has 39403 obs and 5 variables (city_state, solved, victim_age, victim_sex, victim_race)
+
+```{r}
+# Fit the logistic regression model for Baltimore, MD
+baltimore_glm = 
+  homicide_cleaned |> 
+  filter(city_state == "Baltimore, MD") |> 
+  glm(solved ~ victim_age + victim_sex + victim_race, family = binomial(), data = _)
+
+# Extract and process results
+baltimore_glm |> 
+  broom::tidy() |> 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |> 
+  filter(term == "victim_sexMale") |> 
+  select(OR, CI_lower, CI_upper) |>
+  knitr::kable(digits = 3, caption = "Adjusted Odds Ratio for Male Victims vs Female Victims (Baltimore, MD)")
+
+```
+ - adjusted OR is 0.426, 95% CI (0.325, 0.558)
+ - we are 95% confident the true adjusted OR lies between 0.325 and 0.558.
+ - after adjusting for victim age and victim race, the odds of solving homicides for male victims are 57.4% lower compared to female victims.
+ - (1−0.426)×100=57.4%
+
+```{r}
+# Ensure the data is grouped by city_state and nest the data
+victim_MF <- 
+  homicide_cleaned |>
+  nest(data = -city_state) |>  # Group and nest data by city_state
+  mutate(
+    models = map(data, ~ glm(solved ~ victim_age + victim_sex + victim_race, 
+                              family = binomial(), data = .x)),  # Fit logistic regression for each city
+    tidy_models = map(models, broom::tidy)  # Extract model results
+  ) |>
+  select(city_state, tidy_models) |>  # Keep relevant columns
+  unnest(cols = tidy_models) |>  # Unnest the tidy model results
+  mutate(
+    OR = exp(estimate),  # Calculate Odds Ratio
+    CI_lower = exp(estimate - 1.96 * std.error),  # Lower CI bound
+    CI_upper = exp(estimate + 1.96 * std.error)   # Upper CI bound
+  ) |>
+  filter(term == "victim_sexMale") |>  # Filter results for male vs female victims
+  select(city_state, OR, CI_lower, CI_upper)  # Select relevant columns
+
+# Display the first 5 results as a table
+victim_MF |> 
+  slice(1:5) |> 
+  knitr::kable(digits = 4, caption = "Adjusted Odds Ratios for Male Victims vs Female Victims by City")
+```
+`victim_MF` has 47 obs and 4 variables (city_state, OR, CI_lower, CI_upper)
+
+
+plot
+```{r}
+# Plot the ORs and CIs
+or_plot <- victim_MF |>
+  mutate(city_state = fct_reorder(city_state, OR)) |>  # Reorder cities by estimated OR
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() +  # Plot the point estimates for ORs
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +  # Add CIs
+  labs(
+    title = "Adjusted Odds Ratios for Solving Homicides by City",
+    x = "City, State",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate city labels for clarity
+
+# Display the plot
+print(or_plot)
+```
+
+
+## Problem 3
+```{r}
+# Load the dataset
+birthweight <- read.csv("./data/birthweight.csv")
+
+# Data cleaning and preparation using pipes
+data_cleaned <- birthweight |>
+  # Convert selected numeric columns to factors with proper labels
+  mutate(
+    BabySex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    FatherRace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), 
+                        labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+    MotherRace = factor(mrace, levels = c(1, 2, 3, 4, 8), 
+                        labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    Malformations = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+    Parity = as.factor(parity),
+    PreviousLowBirthWeight = as.factor(pnumlbw),
+    PreviousSmallGestationalAge = as.factor(pnumsga)
+  ) %>%
+  # Rename columns for clarity
+  rename(
+    HeadCircumference = bhead,
+    BirthLength = blength,
+    BirthWeight = bwt,
+    MotherWeightAtDelivery = delwt,
+    FamilyIncome = fincome,
+    GestationalAgeWeeks = gaweeks,
+    MotherMenarcheAge = menarche,
+    MotherHeightInches = mheight,
+    MotherAgeAtDelivery = momage,
+    PrePregnancyBMI = ppbmi,
+    PrePregnancyWeight = ppwt,
+    CigarettesPerDay = smoken,
+    WeightGainPregnancy = wtgain
+  )
+
+# Summarize the cleaned dataset
+data_cleaned |>
+  summary()
+
+# Check for missing values
+data_cleaned |>
+  summarise(across(everything(), ~ sum(is.na(.)), .names = "missing_{col}"))
+
+```
+
+`birthweight` has 4342 obs and 20 variavbles.
+after clean, `data_cleaned` has 4342 obs of 32 variables.
+
+# `model1` Gestational Age Model for Birth Weight
+```{r}
+
+# Build the simple regression model
+model1 <- lm(BirthWeight ~ GestationalAgeWeeks, data = data_cleaned)
+
+# Add predictions and residuals to the dataset
+data_cleaned <- data_cleaned %>%
+  add_predictions(model1, var = "Predicted_BirthWeight_Simple") %>%
+  add_residuals(model1, var = "Residuals_Simple")
+
+# Plot residuals vs fitted values
+ggplot(data_cleaned, aes(x = Predicted_BirthWeight_Simple, y = Residuals_Simple)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Gestational Age Model for Birth Weight",
+    x = "Fitted Values (Predicted Birth Weight)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# Display model summary
+summary(model1)
+
+```
+
+
+# `model2` length at birth and gestational age as predictors (main effects only)
+```{r}
+# Fit the regression model
+model2 <- lm(BirthLength ~ GestationalAgeWeeks + BirthWeight, data = data_cleaned)
+
+# Add predictions and residuals to the data set
+data_cleaned <- data_cleaned %>%
+  add_predictions(model2, var = "Predicted_BirthLength") %>%
+  add_residuals(model2, var = "Residuals")
+
+# Plot residuals vs. fitted values
+ggplot(data_cleaned, aes(x = Predicted_BirthLength, y = Residuals)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Gestational and Birthweight Effects on Birth Length",
+    x = "Fitted Values (Predicted Birth Length)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# Display model summary
+summary(model2)
+```
+
+
+# `model3` head circumference, length, sex, and all interactions (including the three-way interaction) between these
+
+```{r}
+# Build the regression model with all interactions
+model3 <- lm(BirthWeight ~ HeadCircumference * BirthLength * BabySex, data = data_cleaned)
+
+# Add predictions and residuals to the dataset
+data_cleaned <- data_cleaned %>%
+  add_predictions(model3, var = "Predicted_BirthWeight") %>%
+  add_residuals(model3, var = "Residuals")
+
+# Plot residuals vs fitted values
+ggplot(data_cleaned, aes(x = Predicted_BirthWeight, y = Residuals)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Interactive Effects of Head Circumference, Birth Length, and Baby Sex on Birth Weight",
+    x = "Predicted Birth Weight",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# Display model summary
+summary(model3)
+```
+
+
+compare 3 models
+```{r}
+
+# Function to calculate CVPE
+calc_cvpe <- function(model, test_data, outcome_var) {
+  test_data %>%
+    add_predictions(model) %>%
+    mutate(sq_error = (test_data[[outcome_var]] - pred)^2) %>%
+    summarise(mean_sq_error = mean(sq_error)) %>%
+    pull(mean_sq_error)
+}
+
+# Create Monte Carlo cross-validation folds
+set.seed(1)  # For reproducibility
+cv_df <- crossv_mc(data_cleaned, 100)
+
+# Ensure train and test sets are tibbles
+cv_df <- cv_df %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+# Fit models and compute CVPE
+cv_df <- cv_df %>% 
+  mutate(
+    # Fit models
+    model1 = map(train, ~ lm(BirthWeight ~ GestationalAgeWeeks, data = .x)),
+    model2 = map(train, ~ lm(BirthLength ~ GestationalAgeWeeks + BirthWeight, data = .x)),
+    model3 = map(train, ~ lm(BirthWeight ~ HeadCircumference * BirthLength * BabySex, data = .x)),
+
+    # Calculate CVPE
+    cvpe_model1 = map2_dbl(model1, test, ~ calc_cvpe(.x, .y, "BirthWeight")),
+    cvpe_model2 = map2_dbl(model2, test, ~ calc_cvpe(.x, .y, "BirthLength")),
+    cvpe_model3 = map2_dbl(model3, test, ~ calc_cvpe(.x, .y, "BirthWeight"))
+  )
+
+cv_summary<- cv_df |> 
+  select(starts_with("cvpe")) |>  # Select only CVPE columns
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "cvpe",
+    names_prefix = "cvpe_"
+  ) |> 
+  mutate(
+    model = recode(model,
+                   model1 = "Model 1",
+                   model2 = "Model 2",
+                   model3 = "Model 3")
+  ) |> 
+  ggplot(aes(x = model, y = cvpe, fill = model)) + 
+  geom_violin(alpha = 0.7) + 
+  labs(
+    title = "CVPE Distribution Across Models",
+    x = "Model",
+    y = "Cross-Validated Prediction Error (CVPE)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Print the plot
+print(cv_summary)
+```
+
+
